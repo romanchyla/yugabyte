@@ -71,7 +71,14 @@ def print_kvs():
             print(kv.key, kv.value)
 
 
-def ingest_binary_files(location, report=100):
+
+def truncate():
+    with app.session_scope() as s:
+        s.execute('truncate table bigtable')
+        s.commit()
+    app.logger.info('Truncated tables: bigtable')
+
+def ingest_binary_files(location, commit_after=1024*1024*100, ignore=1024*1024*200):
     """Will receive a list full of file locations; will read it, open each
     and insert the binary data into the database (as blob).
     
@@ -82,40 +89,62 @@ def ingest_binary_files(location, report=100):
     connection = cursor = None
 
     sql = "INSERT INTO {} VALUES(%s, %s) ON CONFLICT DO NOTHING".format(BigTable.__tablename__)
-
+    batch = []
     i = 0
-    with open(location, 'r') as fi:
-        for line in fi:
-            if cursor is None:
-                connection = app._engine.raw_connection()
-                #connection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-                cursor = connection.cursor()
+    size = 0
+    total_size = 0
+
+    try:
+        with open(location, 'r') as fi:
+            for line in fi:
+                if cursor is None:
+                    connection = app._engine.raw_connection()
+                    #connection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+                    cursor = connection.cursor()
+                    batch = []
+                    total_size += size
+                    size = 0
+                    
+                    
+
+                l = line.strip().split(maxsplit=1)
+                if len(l) == 1:
+                    l.append(l[0])
                 
-                
+                if os.path.exists(l[1]):
+                    s = os.path.getsize(l[1])
+                    if s > ignore:
+                        app.logger.warn('Ignoring {} because it is too large'.format(l[1]))
+                        print('ignoring large file: {}'.format(l[1]))
+                        continue
+                    
+                    batch.append((i, l[1]))
+                    size += s
 
-            l = line.strip().split(maxsplit=1)
-            if len(l) == 1:
-                l.append(l[0])
-            
-            if os.path.exists(l[1]):
-                with open(l[1], 'rb') as input:
-                    # Perform the insertions
-                    cursor.execute(sql, (l[0], psycopg2.Binary(input.read())))
-                    i += 1
-                    if i % report == 0:
-                        connection.commit()
-                        cursor.close()
-                        connection.close()
-                        cursor = connection = None
+                    with open(l[1], 'rb') as input:
+                        # Perform the insertions
+                        cursor.execute(sql, (l[0], psycopg2.Binary(input.read())))
+                        i += 1
+                        if size > commit_after:
+                            print('Committing: {} files, size: {}, total: {}'.format(i, size, total_size))
+                            connection.commit()
+                            cursor.close()
+                            connection.close()
+                            cursor = connection = None
+                            app.logger.info('Wrote: {} files, size: {}, total: {}'.format(i, size, total_size))
+                            
+            else:
+                if connection:
+                    connection.commit()
+                    cursor.close()
+                    connection.close()
+    except:
+        print('Failed, size={}, total={}, batch={}'.format(size, total_size, batch))
+        app.logger.error('Failed: size={}, total={}, batch={}'.format(size, total_size, batch))
+        raise
 
-                        app.logger.info('Read and inserted %s binary files so far', i)
-        else:
-            if connection:
-                connection.commit()
-                cursor.close()
-                connection.close()
 
-    app.logger.info('Done inserting %s binary files', i)
+    app.logger.info('Done inserting %s binary files, total=%i', i, total_size)
 
     return i
 
@@ -152,11 +181,33 @@ if __name__ == '__main__':
                         dest='ingest_keyvalue',
                         action='store',
                         help='File containing key\tlocation; location will be read in as binary and inserted into bigtable')
+    parser.add_argument('-c',
+                        '--max_commit_size',
+                        dest='max_commit_size',
+                        action='store',
+                        default=1024*1024*100,
+                        help='Issue commit after this many bytes were read')
+    parser.add_argument('-m',
+                        '--max_file_size',
+                        dest='max_file_size',
+                        action='store',
+                        default=1024*1024*60,
+                        help='Files larger than this will be ignored')
+    parser.add_argument('-x',
+                        '--truncate',
+                        dest='truncate',
+                        action='store_true',
+                        default=False,
+                        help='Truncate database before commencing')
+ 
 
 
     args = parser.parse_args()
 
     logger.info('Executing run.py: %s', args)
+
+    if args.truncate:
+        truncate()
 
     if args.bibcodes:
         args.bibcodes = args.bibcodes.split(' ')
@@ -167,7 +218,7 @@ if __name__ == '__main__':
     if args.ingest_keyvalue:
         if os.path.exists(args.ingest_keyvalue):
             print('Starting ingest')
-            print('Done ingesting {} objects'.format(ingest_binary_files(args.ingest_keyvalue, args.batch_size)))
+            print('Done ingesting {} objects'.format(ingest_binary_files(args.ingest_keyvalue, int(args.max_commit_size), int(args.max_file_size))))
         else:
             exit('The {} does not exist'.format(args.ingest_keyvalue))
 
