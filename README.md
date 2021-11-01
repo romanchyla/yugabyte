@@ -16,17 +16,12 @@ pip3 install -r requirements.txt
 ```
 This environment is now configured to run the python code.  
 
-### Open src/config.py and update the database settings:
+### Open `local_config.py` and update settings:
 ```
-listen_port = 8080
-db_user = 'postgres'
-db_password = None
-database = 'postgres'
-db_host = 'localhost'
-db_port = 5433
+SQLALCHEMY_URL = ''
 ```
 ---
-### Start the server that will listen for your commands: 
+### Ingest data (logs are written into ./logs)
 ```
-python3 ./src/rest-service.py
+python3 run.py -i <key/value file>
 ```
